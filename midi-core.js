@@ -1,290 +1,251 @@
-(function (root, factory) {
-  if (typeof module === "object" && module.exports) module.exports = factory();
-  else root.MidiCore = factory();
-})(typeof self !== "undefined" ? self : this, function () {
-  function lame() {
-    if (typeof lamejs === "function") return lamejs;
-    if (typeof require === "function") {
-      const fs = require("fs");
-      const path = require("path");
-      const vm = require("vm");
-      const file = path.join(__dirname, "lame.min.js");
-      vm.runInThisContext(fs.readFileSync(file, "utf8") + "\n;globalThis.lamejs = lamejs;");
-      return globalThis.lamejs;
+(function (root) {
+  const SR = 22050;
+  const FRAME = 2048;
+  const HOP = 256;
+  const FPS = SR / HOP;
+  const GRID = 4;
+  const FMIN = 55;
+  const FMAX = 2100;
+
+  function fft(re, im) {
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) {
+        let t = re[i]; re[i] = re[j]; re[j] = t;
+        t = im[i]; im[i] = im[j]; im[j] = t;
+      }
     }
-    throw new Error("MP3 encoder not loaded");
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = -2 * Math.PI / len;
+      const wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) {
+        let cr = 1, ci = 0;
+        for (let j = 0; j < len / 2; j++) {
+          const ur = re[i + j], ui = im[i + j];
+          const vr = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci;
+          const vi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
+          re[i + j] = ur + vr; im[i + j] = ui + vi;
+          re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
+          const ncr = cr * wr - ci * wi;
+          ci = cr * wi + ci * wr;
+          cr = ncr;
+        }
+      }
+    }
   }
 
-  function readVarLen(view, state) {
-    let value = 0;
-    for (let i = 0; i < 4; i++) {
-      const b = view.getUint8(state.p++);
-      value = (value << 7) | (b & 0x7f);
-      if (!(b & 0x80)) break;
-    }
-    return value;
+  async function decode(file, onProgress) {
+    const arrayBuffer = await file.arrayBuffer();
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = new AC();
+    const buf = await ac.decodeAudioData(arrayBuffer.slice(0));
+    const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(buf.duration * SR)), SR);
+    const src = off.createBufferSource();
+    src.buffer = buf;
+    src.connect(off.destination);
+    src.start();
+    const rendered = await off.startRendering();
+    ac.close();
+    const data = rendered.getChannelData(0);
+    if (onProgress) onProgress(1);
+    return { samples: Float32Array.from(data), duration: rendered.duration };
   }
 
-  function parseMidi(buffer) {
-    const view = new DataView(buffer);
-    let p = 0;
-    const str = (o) => String.fromCharCode(view.getUint8(o), view.getUint8(o + 1), view.getUint8(o + 2), view.getUint8(o + 3));
-    if (str(0) !== "MThd") throw new Error("不是有效的 MIDI 文件");
-    const headerLen = view.getUint32(4);
-    const format = view.getUint16(8);
-    const trackCount = view.getUint16(10);
-    const division = view.getInt16(12);
-    if (division <= 0) throw new Error("暂不支持 SMPTE 时间格式的 MIDI");
-    const ppq = division;
-    p = 8 + headerLen;
+  function transcribe(samples, opts, onProgress) {
+    const minNote = (opts && opts.minNote) || 0.05;
+    const polyphony = (opts && opts.polyphony) || 5;
+    const maxFrames = 1 + Math.floor((samples.length - FRAME) / HOP);
+    if (maxFrames <= 0) throw new Error("音频太短，至少需要 0.2 秒");
 
-    const tracks = [];
-    const tempos = [{ tick: 0, usPerQuarter: 500000 }];
+    const win = new Float32Array(FRAME);
+    for (let i = 0; i < FRAME; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FRAME - 1));
 
-    for (let t = 0; t < trackCount && p + 8 <= view.byteLength; t++) {
-      const chunk = str(p);
-      const len = view.getUint32(p + 4);
-      p += 8;
-      if (chunk !== "MTrk") { p += len; continue; }
+    const nyquistBins = FRAME / 2;
+    const gridLo = Math.round((69 + 12 * Math.log2(FMIN / 440)) * GRID);
+    const gridHi = Math.round((69 + 12 * Math.log2(FMAX / 440)) * GRID);
+    const gridCount = gridHi - gridLo + 1;
+    const matrix = new Float32Array(gridCount * maxFrames);
 
-      const end = p + len;
-      const state = { p };
-      let tick = 0;
-      let running = 0;
-      let name = "";
-      const open = new Map();
-      const notes = [];
+    const re = new Float32Array(FRAME);
+    const im = new Float32Array(FRAME);
 
-      while (state.p < end) {
-        tick += readVarLen(view, state);
-        let status = view.getUint8(state.p);
-        if (status < 0x80) {
-          status = running;
-        } else {
-          state.p++;
-          if (status < 0xf0) running = status;
-        }
-
-        if (status === 0xff) {
-          const type = view.getUint8(state.p++);
-          const size = readVarLen(view, state);
-          if (type === 0x51 && size >= 3) {
-            const us = (view.getUint8(state.p) << 16) | (view.getUint8(state.p + 1) << 8) | view.getUint8(state.p + 2);
-            tempos.push({ tick, usPerQuarter: us || 500000 });
-          } else if (type === 0x03) {
-            let s = "";
-            for (let i = 0; i < size; i++) s += String.fromCharCode(view.getUint8(state.p + i));
-            name = s.trim();
-          }
-          state.p += size;
-          continue;
-        }
-
-        if (status === 0xf0 || status === 0xf7) {
-          const size = readVarLen(view, state);
-          state.p += size;
-          continue;
-        }
-
-        const hi = status & 0xf0;
-        const channel = status & 0x0f;
-
-        if (hi === 0x90 || hi === 0x80) {
-          const note = view.getUint8(state.p);
-          const vel = view.getUint8(state.p + 1);
-          state.p += 2;
-          const key = channel + ":" + note;
-          if (hi === 0x90 && vel > 0) {
-            if (!open.has(key)) open.set(key, []);
-            open.get(key).push({ tick, vel });
-          } else {
-            const stack = open.get(key);
-            if (stack && stack.length) {
-              const start = stack.shift();
-              notes.push({ tick: start.tick, durationTicks: tick - start.tick, midi: note, velocity: start.vel, channel });
-            }
-          }
-        } else if (hi === 0xc0 || hi === 0xd0) {
-          state.p += 1;
-        } else {
-          state.p += 2;
-        }
+    for (let f = 0; f < maxFrames; f++) {
+      const start = f * HOP;
+      for (let i = 0; i < FRAME; i++) {
+        re[i] = samples[start + i] * win[i];
+        im[i] = 0;
       }
-
-      for (const [key, stack] of open) {
-        const note = Number(key.split(":")[1]);
-        const channel = Number(key.split(":")[0]);
-        for (const s of stack) notes.push({ tick: s.tick, durationTicks: Math.max(ppq / 8, 1), midi: note, velocity: s.vel, channel });
+      fft(re, im);
+      for (let k = 1; k < nyquistBins; k++) {
+        const freq = k * SR / FRAME;
+        if (freq < FMIN || freq > FMAX) continue;
+        const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
+        const note = 69 + 12 * Math.log2(freq / 440);
+        const g = Math.round(note * GRID) - gridLo;
+        if (g < 0 || g >= gridCount) continue;
+        const idx = g * maxFrames + f;
+        if (mag > matrix[idx]) matrix[idx] = mag;
       }
-
-      tracks.push({ name: name || "Track " + (t + 1), channel: notes.length ? notes[0].channel : 0, notes });
-      p = end;
-    }
-
-    tempos.sort((a, b) => a.tick - b.tick);
-    const tempoMap = [];
-    let us = 500000, lastTick = 0, lastSec = 0;
-    for (const tm of tempos) {
-      if (tempoMap.length) {
-        const d = tm.tick - lastTick;
-        lastSec += (d / ppq) * (us / 1e6);
-      }
-      tempoMap.push({ tick: tm.tick, sec: lastSec, usPerQuarter: tm.usPerQuarter });
-      lastTick = tm.tick;
-      us = tm.usPerQuarter;
-    }
-    const tempoAt = (tick) => {
-      let seg = tempoMap[0];
-      for (const s of tempoMap) if (s.tick <= tick) seg = s;
-      return seg.sec + ((tick - seg.tick) / ppq) * (seg.usPerQuarter / 1e6);
-    };
-
-    const allNotes = [];
-    for (const tr of tracks) {
-      for (const n of tr.notes) {
-        const start = tempoAt(n.tick);
-        const endSec = tempoAt(n.tick + n.durationTicks);
-        allNotes.push({
-          time: start,
-          duration: Math.max(0.02, endSec - start),
-          midi: n.midi,
-          velocity: n.velocity,
-          channel: n.channel,
-          track: tr.name
-        });
-      }
-    }
-    allNotes.sort((a, b) => a.time - b.time);
-
-    const duration = allNotes.reduce((m, n) => Math.max(m, n.time + n.duration), 0);
-    const bpm = Math.round(60000000 / tempoMap.filter((s) => s.tick === 0).pop().usPerQuarter);
-    const noteCount = allNotes.length;
-
-    return {
-      ppq, format, bpm, notes: allNotes, duration, noteCount,
-      tempoMap,
-      tracks: tracks.map((tr) => ({ name: tr.name, notes: tr.notes.length }))
-    };
-  }
-
-  const TIMBRES = {
-    sine: (ph) => Math.sin(ph),
-    triangle: (ph) => (2 / Math.PI) * Math.asin(Math.sin(ph)),
-    square: (ph) => (Math.sin(ph) >= 0 ? 1 : -1) * 0.7,
-    saw: (ph) => { const t = ph / (Math.PI * 2); return 2 * (t - Math.floor(t + 0.5)); },
-    epiano: (ph) => Math.sin(ph) + 0.35 * Math.sin(2 * ph) * Math.exp(-0.002 * ph) + 0.12 * Math.sin(3 * ph)
-  };
-
-  function renderNotes(notes, opts) {
-    const sr = (opts && opts.sampleRate) || 44100;
-    const timbre = (opts && opts.timbre) || "epiano";
-    const gain = (opts && opts.gain) || 1;
-    const total = notes.reduce((m, n) => Math.max(m, n.time + n.duration), 0);
-    const frames = Math.ceil((total + 0.25) * sr);
-    const out = new Float32Array(frames);
-    const wave = TIMBRES[timbre] || TIMBRES.epiano;
-    const twoPi = Math.PI * 2;
-
-    for (const n of notes) {
-      const start = Math.floor(n.time * sr);
-      const dur = Math.max(24, Math.floor(n.duration * sr));
-      const release = Math.min(Math.floor(0.12 * sr), dur);
-      const attack = Math.min(Math.floor(0.008 * sr), dur);
-      const vel = (n.velocity || 80) / 127;
-      const isDrum = n.channel === 9;
-      const freq = isDrum ? 0 : 440 * Math.pow(2, (n.midi - 69) / 12);
-      const amp = isDrum ? vel * 0.8 * gain : vel * 0.28 * gain;
-      const step = twoPi * freq / sr;
-      let phase = 0;
-      let seed = (n.midi * 7919 + start) % 65536;
-
-      for (let i = 0; i < dur; i++) {
-        const idx = start + i;
-        if (idx >= frames) break;
-        let env;
-        if (i < attack) env = i / attack;
-        else if (i > dur - release) env = Math.max(0, (dur - i) / release);
-        else env = 0.7 + 0.3 * Math.exp(-i / (sr * 0.35));
-        let s;
-        if (isDrum) {
-          seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-          s = ((seed / 0x7fffffff) * 2 - 1) * Math.exp(-i / (sr * 0.06));
-        } else {
-          phase += step;
-          s = wave(phase) * Math.exp(-i / (sr * 1.2));
-        }
-        out[idx] += s * env * amp;
-      }
+      if (onProgress && f % 120 === 0) onProgress(f / maxFrames);
     }
 
     let peak = 0;
-    for (let i = 0; i < frames; i++) peak = Math.max(peak, Math.abs(out[i]));
-    if (peak > 0) {
-      const k = 0.9 / peak;
-      for (let i = 0; i < frames; i++) out[i] = Math.tanh(out[i] * k * 1.02);
+    for (let i = 0; i < matrix.length; i++) if (matrix[i] > peak) peak = matrix[i];
+    if (peak <= 0) throw new Error("没听到有效的声音");
+    for (let i = 0; i < matrix.length; i++) matrix[i] /= peak;
+
+    const keepPerFrame = Math.max(2, Math.min(8, polyphony + 1));
+    const mask = new Uint8Array(matrix.length);
+    for (let f = 0; f < maxFrames; f++) {
+      const vals = [];
+      for (let g = 0; g < gridCount; g++) vals.push([matrix[g * maxFrames + f], g]);
+      vals.sort((a, b) => b[0] - a[0]);
+      const framePeak = vals.length ? vals[0][0] : 0;
+      for (let i = 0; i < Math.min(keepPerFrame, vals.length); i++) {
+        const [v, g] = vals[i];
+        if (v > 0.05 && v > framePeak * 0.07) mask[g * maxFrames + f] = 1;
+      }
     }
-    return { pcm: out, sampleRate: sr, duration: frames / sr };
+
+    const minFrames = Math.max(2, Math.round(minNote * FPS));
+    let notes = [];
+    for (let g = 0; g < gridCount; g++) {
+      let startF = -1, gap = 0;
+      for (let f = 0; f <= maxFrames; f++) {
+        const on = f < maxFrames && mask[g * maxFrames + f];
+        if (on) {
+          if (startF < 0) startF = f;
+          gap = 0;
+        } else if (startF >= 0) {
+          gap++;
+          if (gap > 2 || f === maxFrames) {
+            const endF = f - gap;
+            if (endF - startF + 1 >= minFrames) {
+              let sum = 0, cnt = 0;
+              for (let x = startF; x <= endF; x++) {
+                sum += matrix[g * maxFrames + x];
+                cnt++;
+              }
+              notes.push({
+                start: startF / FPS,
+                end: (endF + 1) / FPS,
+                midi: Math.round((gridLo + g) / GRID),
+                grid: gridLo + g,
+                conf: sum / Math.max(1, cnt)
+              });
+              startF = -1;
+            } else {
+              startF = -1;
+            }
+          }
+        }
+      }
+    }
+
+    const byGrid = {};
+    for (const n of notes) (byGrid[n.grid] = byGrid[n.grid] || []).push(n);
+    const overtone = [[48, 0.45], [76, 0.35], [96, 0.28]];
+    notes = notes.filter((n) => {
+      for (const [off, ratio] of overtone) {
+        for (let d = -1; d <= 1; d++) {
+          const lower = byGrid[n.grid - off + d];
+          if (!lower) continue;
+          for (const L of lower) {
+            if (L.grid >= n.grid) continue;
+            const overlap = Math.min(n.end, L.end) - Math.max(n.start, L.start);
+            const span = Math.min(n.end - n.start, L.end - L.start);
+            if (overlap > 0 && overlap / Math.max(span, 1e-6) > 0.55 && n.conf < L.conf * ratio * 2.2) return false;
+          }
+        }
+      }
+      return true;
+    });
+
+    notes.sort((a, b) => a.start - b.start || a.midi - b.midi);
+    if (polyphony > 0) {
+      const allowed = new Set();
+      const times = Array.from(new Set(notes.map((n) => Math.round(n.start * FPS))));
+      for (const t of times) {
+        const tn = t / FPS;
+        const active = notes.filter((n) => n.start <= tn + 1e-6 && n.end > tn);
+        active.sort((a, b) => b.conf - a.conf);
+        active.slice(0, polyphony).forEach((n) => allowed.add(n));
+      }
+      notes = notes.filter((n) => allowed.has(n));
+    }
+
+    for (const n of notes) {
+      n.velocity = Math.max(30, Math.min(120, Math.round(30 + n.conf * 130)));
+      delete n.grid;
+      delete n.conf;
+    }
+
+    const duration = samples.length / SR;
+    return { notes, duration, noteCount: notes.length };
   }
 
-  function encodeMp3(pcm, sampleRate, kbps) {
-    const Lame = lame();
-    const enc = new Lame.Mp3Encoder(1, sampleRate, kbps || 192);
-    const block = 1152;
-    const parts = [];
-    for (let i = 0; i < pcm.length; i += block) {
-      const chunk = pcm.subarray(i, Math.min(i + block, pcm.length));
-      const int16 = new Int16Array(chunk.length);
-      for (let j = 0; j < chunk.length; j++) {
-        const s = Math.max(-1, Math.min(1, chunk[j]));
-        int16[j] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-      const buf = enc.encodeBuffer(int16);
-      if (buf.length) parts.push(new Int8Array(buf));
+  function vlq(v) {
+    let out = [v & 0x7f];
+    v >>= 7;
+    while (v) {
+      out.unshift((v & 0x7f) | 0x80);
+      v >>= 7;
     }
-    const tail = enc.flush();
-    if (tail.length) parts.push(new Int8Array(tail));
-    const size = parts.reduce((m, b) => m + b.length, 0);
-    const out = new Int8Array(size);
-    let off = 0;
-    for (const b of parts) { out.set(b, off); off += b.length; }
     return out;
   }
 
-  function encodeMp3Async(pcm, sampleRate, kbps, onProgress) {
-    const Lame = lame();
-    const enc = new Lame.Mp3Encoder(1, sampleRate, kbps || 192);
-    const block = 1152 * 8;
-    const parts = [];
-    return new Promise((resolve, reject) => {
-      let i = 0;
-      function step() {
-        try {
-          const stop = Math.min(i + block, pcm.length);
-          const chunk = pcm.subarray(i, stop);
-          const int16 = new Int16Array(chunk.length);
-          for (let j = 0; j < chunk.length; j++) {
-            const s = Math.max(-1, Math.min(1, chunk[j]));
-            int16[j] = s < 0 ? s * 0x8000 : s * 0x7fff;
-          }
-          const buf = enc.encodeBuffer(int16);
-          if (buf.length) parts.push(new Int8Array(buf));
-          i = stop;
-          if (onProgress) onProgress(pcm.length ? i / pcm.length : 1);
-          if (i < pcm.length) setTimeout(step, 0);
-          else {
-            const tail = enc.flush();
-            if (tail.length) parts.push(new Int8Array(tail));
-            const size = parts.reduce((m, b) => m + b.length, 0);
-            const out = new Int8Array(size);
-            let off = 0;
-            for (const b of parts) { out.set(b, off); off += b.length; }
-            resolve(out);
-          }
-        } catch (e) { reject(e); }
-      }
-      step();
+  function writeMidi(notes, duration, bpm) {
+    const division = 96;
+    const tempoBpm = bpm || 120;
+    const usPerQuarter = Math.round(60000000 / tempoBpm);
+    const tps = division * tempoBpm / 60;
+
+    const track = [];
+    const push = (...bytes) => track.push(...bytes);
+    push(0x00, 0xff, 0x51, 0x03, (usPerQuarter >> 16) & 0xff, (usPerQuarter >> 8) & 0xff, usPerQuarter & 0xff);
+    push(0x00, 0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08);
+    const name = "Transcribed";
+    push(0x00, 0xff, 0x03, name.length, ...Array.from(name).map((c) => c.charCodeAt(0)));
+
+    const events = [];
+    notes.forEach((n, i) => {
+      const ch = i % 8;
+      const on = Math.round(n.start * tps);
+      const off = Math.max(on + 1, Math.round(n.end * tps));
+      events.push([on, 1, [0x90 | ch, n.midi & 0x7f, n.velocity & 0x7f]]);
+      events.push([off, 0, [0x80 | ch, n.midi & 0x7f, 0x40]]);
     });
+    events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+
+    let last = 0;
+    for (const [tick, , payload] of events) {
+      push(...vlq(Math.max(0, tick - last)), ...payload);
+      last = tick;
+    }
+    push(0x00, 0xff, 0x2f, 0x00);
+
+    const out = [];
+    const put16 = (v) => out.push((v >> 8) & 0xff, v & 0xff);
+    const put32 = (v) => out.push((v >>> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+    out.push(0x4d, 0x54, 0x68, 0x64);
+    put32(6);
+    put16(1);
+    put16(2);
+    put16(division);
+    out.push(0x4d, 0x54, 0x72, 0x6b);
+    put32(track.length);
+    out.push(...track);
+    return new Uint8Array(out);
   }
 
-  return { parseMidi, renderNotes, encodeMp3, encodeMp3Async, TIMBRES: Object.keys(TIMBRES) };
-});
+  function noteName(midi) {
+    const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const oct = Math.floor(midi / 12) - 1;
+    return names[midi % 12] + oct;
+  }
+
+  root.PitchForge = { decode, transcribe, writeMidi, noteName, SR };
+})(typeof self !== "undefined" ? self : this);

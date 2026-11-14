@@ -1,38 +1,53 @@
-# MidiForge · MIDI 转 MP3
+# PitchForge · MP3 → MIDI
 
-把 `.mid` 拖进来，浏览器里合成波形、LAME 编码，直接下载 MP3。
+把 MP3 / WAV / M4A / FLAC / OGG 里的旋律识别成音符，导出标准 `.mid`。
 
-## 两种运行方式
+## 两种识别引擎
 
-**纯前端**
-解析、合成、MP3 编码全在浏览器完成，文件不离开本机。
+| 引擎 | 位置 | 说明 |
+|---|---|---|
+| 服务器 | `app.py` | Flask + librosa，CQT 频谱峰值追踪 + 谐波剔除，效果更好，需要跑 Python 服务 |
+| 浏览器内 | `midi-core.js` | 页面里的 FFT 峰值追踪，零依赖，GitHub Pages 这类纯静态托管也能用 |
 
-**前后端（自带 Node 服务）**
+页面启动时请求 `api/health`：连得上后端就默认用服务器引擎，连不上就自动切浏览器引擎并把服务器选项置灰。
+
+## 跑后端
 
 ```bash
-node server.js          # 默认 3000 端口
+pip install -r requirements.txt
+python3 app.py          # 默认 5000，PORT=5050 python3 app.py 可改端口
 ```
 
-- `GET /` 静态页面
-- `GET /api/health` 返回服务状态
-- `POST /api/convert?timbre=epiano&kbps=192&sr=44100` 请求体为 MIDI 二进制，返回 `audio/mpeg`
+依赖 ffmpeg（解码 MP3/M4A/FLAC）。浏览器打开 `http://127.0.0.1:5000/` 即可，前端由 Flask 直接托管。
 
-页面右上角会显示「本机 + 服务器」，转换位置切到「服务器」就走这个接口。
+## 接口
 
-## 文件
+`GET /api/health` → `{ok, engine, maxSeconds, formats}`
 
-| 文件 | 作用 |
-|---|---|
-| `index.html` / `styles.css` / `app.js` | 界面、交互、播放与导出 |
-| `midi-core.js` | MIDI 解析、合成、MP3 编码（浏览器与 Node 共用） |
-| `lame.min.js` | LAME 编码器（本地内置，不走 CDN） |
-| `server.js` | 零依赖 Node HTTP 服务，提供转换接口 |
-| `.gitlab-ci.yml` | Pages 构建：把静态文件拷进 `public/` |
+`POST /api/transcribe`（multipart）
 
-## 支持的 MIDI
+- `audio`：音频文件，≤30MB，≤180 秒
+- `minNote`：最短音符，秒，默认 0.05
+- `polyphony`：同时发声上限，1–8，默认 5
 
-格式 0 / 1，PPQ 时间格式，tempo 变速事件会按时间轴换算；轨道 10（通道 9）按打击乐处理。
+返回 `{ok, duration, truncated, sampleRate, notes[], noteCount, midiBase64, midiBytes, filename}`。
 
-## 说明
+## 结构
 
-MIDI 只记录音符与力度，不含真实录音。导出的 MP3 是「用内置合成器重新演奏」的结果，音色可在界面上切换。
+```
+index.html      页面
+styles.css      样式
+app.js          交互：解码 / 波形 / 识别 / 卷帘 / 试听 / 下载
+midi-core.js    浏览器内 FFT 转录 + MIDI 写入（window.PitchForge）
+app.py          后端：解码 / 频谱转录 / MIDI 写入 / Flask 路由
+requirements.txt
+testdata/       测试素材（test.mp3 / test.mid）
+```
+
+## 参数
+
+采样率 22050，帧长 2048，跳 256（≈86 帧/秒），音高格子 1/4 半音（48/八度），MIDI 分辨率 96 tick/拍，默认 120 BPM。
+
+## 限制
+
+适合单乐器旋律、钢琴独奏、清唱、简单和弦。鼓组密集或多乐器混录时音符会粘连，属于频谱转录的固有限制。

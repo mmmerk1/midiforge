@@ -3,60 +3,60 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>MidiForge · MIDI 转 MP3</title>
-<meta name="description" content="把 .mid 文件拖进来，浏览器里直接合成并导出 MP3。">
+<title>PitchForge · MP3 转 MIDI</title>
+<meta name="description" content="上传 MP3 / WAV，识别音符并导出 .mid。">
 <link rel="stylesheet" href="styles.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0c0f'/%3E%3Cpath d='M7 16h4l2-6 3 12 2-5h5' stroke='%23a3ff12' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0c0f'/%3E%3Cpath d='M6 18c3 0 3-8 6-8s3 12 6 12 4-6 8-6' stroke='%23a3ff12' stroke-width='2' fill='none'/%3E%3C/svg%3E">
 </head>
 <body>
 <div class="noise"></div>
-<div class="scan"></div>
 
 <header class="top">
   <div class="brand">
     <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
-      <path d="M4 16h5l2.5-7 4 14 2.5-6h5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      <path d="M4 20c4 0 4-12 8-12s4 16 8 16 4-8 8-8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
     </svg>
     <div>
-      <b>MidiForge</b>
-      <span>MIDI → MP3 转换器</span>
+      <b>PitchForge</b>
+      <span>MP3 → MIDI 音高识别</span>
     </div>
   </div>
   <div class="top-right">
     <span class="engine" id="engine"><i></i>检测中</span>
-    <a class="ghost" href="https://gitlab.com" target="_blank" rel="noopener">GitLab</a>
+    <a class="ghost" href="https://github.com/mmmerk1/midiforge" target="_blank" rel="noopener">源码</a>
   </div>
 </header>
 
 <main>
   <section class="intro">
-    <div class="kicker">BROWSER SYNTH · NO PLUGIN</div>
-    <h1>把 <em>.mid</em> 变成能直接发的 <em>MP3</em></h1>
-    <p>解析音符 → 实时合成 → LAME 编码，全程在本机完成。不上传、不排队，文件不离开你的电脑。</p>
+    <div class="kicker">AUDIO → NOTES · SPECTRAL TRANSCRIPTION</div>
+    <h1>把一段 <em>MP3</em> 听成 <em>MIDI</em></h1>
+    <p>解码音频、分离谐波、逐帧做频谱峰值追踪，把声音还原成音符事件，导出标准 .mid。文件在你的机器上处理，服务器版本也不留存音频。</p>
     <div class="steps">
-      <div class="step" data-step="1"><b>01</b><span>拖入 MIDI</span></div>
-      <div class="step" data-step="2"><b>02</b><span>试听与波形</span></div>
-      <div class="step" data-step="3"><b>03</b><span>导出 MP3</span></div>
+      <div class="step" data-step="1"><b>01</b><span>上传音频</span></div>
+      <div class="step" data-step="2"><b>02</b><span>识别音符</span></div>
+      <div class="step" data-step="3"><b>03</b><span>导出 MIDI</span></div>
     </div>
   </section>
 
   <section class="panel">
     <div class="drop" id="drop">
-      <input type="file" id="file" accept=".mid,.midi,audio/midi,audio/x-midi" hidden>
+      <input type="file" id="file" accept=".mp3,.wav,.m4a,.flac,.ogg,audio/mpeg,audio/wav" hidden>
       <div class="drop-inner">
         <div class="disc">
           <svg viewBox="0 0 64 64" aria-hidden="true">
-            <circle cx="32" cy="32" r="20" fill="none" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M32 12v40M12 32h40" stroke="currentColor" stroke-width="1.5"/>
+            <circle cx="32" cy="32" r="19" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <circle cx="32" cy="32" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M32 6v8M32 50v8M6 32h8M50 32h8" stroke="currentColor" stroke-width="1.5"/>
           </svg>
         </div>
         <div class="drop-copy">
-          <b>拖拽 .mid 文件到这里</b>
-          <span>或者 <u id="pick">点击选择文件</u> · 支持格式 0 / 1，最大 25MB</span>
+          <b>拖拽 MP3 / WAV 到这里</b>
+          <span>或者 <u id="pick">点击选择文件</u> · 支持 MP3 / WAV / M4A / FLAC / OGG，最长 3 分钟</span>
         </div>
       </div>
       <div class="drop-file" id="fileInfo" hidden>
-        <div class="fname" id="fname">song.mid</div>
+        <div class="fname" id="fname">song.mp3</div>
         <div class="fmeta" id="fmeta"></div>
         <button class="mini" id="reset" type="button">换一个</button>
       </div>
@@ -64,29 +64,27 @@
 
     <div class="settings" id="settings" hidden>
       <div class="field">
-        <label>音色</label>
-        <div class="chips" id="timbreChips">
-          <button class="chip on" data-v="epiano">电钢琴</button>
-          <button class="chip" data-v="sine">正弦</button>
-          <button class="chip" data-v="triangle">三角</button>
-          <button class="chip" data-v="square">方波</button>
-          <button class="chip" data-v="saw">锯齿</button>
-        </div>
-      </div>
-      <div class="field">
-        <label>码率</label>
-        <div class="chips" id="kbpsChips">
-          <button class="chip" data-v="128">128k</button>
-          <button class="chip on" data-v="192">192k</button>
-          <button class="chip" data-v="256">256k</button>
-          <button class="chip" data-v="320">320k</button>
-        </div>
-      </div>
-      <div class="field">
-        <label>转换位置</label>
+        <label>识别引擎</label>
         <div class="chips" id="modeChips">
-          <button class="chip on" data-v="local">本机</button>
-          <button class="chip" data-v="server" disabled>服务器</button>
+          <button class="chip on" data-v="server">服务器</button>
+          <button class="chip" data-v="local">浏览器内</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>最短音符</label>
+        <div class="chips" id="minNoteChips">
+          <button class="chip" data-v="0.03">30ms</button>
+          <button class="chip on" data-v="0.05">50ms</button>
+          <button class="chip" data-v="0.1">100ms</button>
+          <button class="chip" data-v="0.2">200ms</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>声部上限</label>
+        <div class="chips" id="polyChips">
+          <button class="chip" data-v="1">单声部</button>
+          <button class="chip on" data-v="5">5</button>
+          <button class="chip" data-v="8">8</button>
         </div>
       </div>
     </div>
@@ -95,8 +93,13 @@
   <section class="stage" id="stage" hidden>
     <div class="roller">
       <div class="roller-head">
-        <span class="label">钢琴卷帘预览</span>
-        <span class="dim" id="rollerMeta"></span>
+        <span class="label">音频波形</span>
+        <span class="dim" id="waveMeta"></span>
+      </div>
+      <canvas id="wave"></canvas>
+      <div class="roller-head roll-head2">
+        <span class="label">识别结果 · 钢琴卷帘</span>
+        <span class="dim" id="rollMeta"></span>
       </div>
       <canvas id="roll"></canvas>
       <div class="transport">
@@ -111,50 +114,50 @@
     <aside class="out">
       <div class="stat-row">
         <div><b id="sNotes">0</b><span>音符</span></div>
-        <div><b id="sTracks">0</b><span>轨道</span></div>
-        <div><b id="sBpm">0</b><span>BPM</span></div>
+        <div><b id="sRange">—</b><span>音域</span></div>
+        <div><b id="sDur">0:00</b><span>时长</span></div>
       </div>
 
       <button class="convert" id="convert" type="button" disabled>
-        <span class="ctext">开始转换 MP3</span>
+        <span class="ctext">开始识别音符</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13m-5-6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
       </button>
 
       <div class="progress" id="progress" hidden>
-        <div class="p-head"><span id="pLabel">合成中…</span><b id="pPct">0%</b></div>
+        <div class="p-head"><span id="pLabel">分析中…</span><b id="pPct">0%</b></div>
         <div class="p-bar"><div id="pFill"></div></div>
       </div>
 
       <div class="result" id="result" hidden>
-        <div class="r-icon">♪</div>
+        <div class="r-icon">♬</div>
         <div class="r-copy">
-          <b id="rName">song.mp3</b>
+          <b id="rName">song.mid</b>
           <span id="rMeta"></span>
         </div>
-        <a class="download" id="download" download>下载</a>
+        <a class="download" id="download" download>下载 .mid</a>
       </div>
 
-      <p class="hint" id="hint">转换只读音符数据，不会上传到任何服务器。</p>
+      <p class="hint" id="hint">先上传一段音频。识别只提取音高与节奏，不会还原原始音色。</p>
     </aside>
   </section>
 
   <section class="notes">
-    <h2>这东西是怎么工作的</h2>
+    <h2>它到底做了什么</h2>
     <div class="notes-grid">
-      <article><b>解析</b><p>读 SMF 头块与轨道块，按 tempo 事件把 tick 换算成真实秒数，还原每个音符的起点、长度与力度。</p></article>
-      <article><b>合成</b><p>按等时采样逐帧叠加包络与谐波，音符重叠自动混音，最后做一次软削峰避免爆音。</p></article>
-      <article><b>编码</b><p>PCM 按 1152 样本分批喂给 LAME，边编码边回传进度，完成后拼成标准 MP3 帧。</p></article>
-      <article><b>隐私</b><p>文件全程留在内存中，刷新即清空。界面上没有上传按钮，也没有后台存储。</p></article>
+      <article><b>解码</b><p>把 MP3 解成 22.05kHz 单声道波形，去掉容器与比特率带来的干扰。</p></article>
+      <article><b>分离</b><p>谐波与打击成分分离，只留周期性强的谐波部分，避免鼓点被当成音符。</p></article>
+      <article><b>追踪</b><p>逐帧做频谱，取每帧峰值，按四分之一音高处量化成音高格子，连续帧合并成音符。</p></article>
+      <article><b>成谱</b><p>按起始时间排序、剔除八度泛音、限制同时发声数量，写进标准 MIDI（1/96 拍分辨率）。</p></article>
     </div>
+    <p class="limits">适合：钢琴独奏、单乐器旋律、人声清唱、简单和弦伴奏。不适合：鼓组密集、多乐器混录。混音复杂时音符会串成一团，这是频谱转录本身的限制，不是参数能救回来的。</p>
   </section>
 </main>
 
 <footer class="foot">
-  <span>MidiForge</span>
-  <span class="dim">MIDI 只承载音符，音色由合成器决定 —— 转换结果是「用这套合成器重新演奏」，不是原曲录音。</span>
+  <span>PitchForge · MP3 → MIDI</span>
+  <span class="dim">识别结果取决于素材：单旋律准，复杂混音只能听个大概。</span>
 </footer>
 
-<script src="lame.min.js"></script>
 <script src="midi-core.js"></script>
 <script src="app.js"></script>
 </body>
